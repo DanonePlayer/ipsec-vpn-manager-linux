@@ -1,0 +1,11 @@
+{
+    "profiles": [
+        {
+            "name": "VPN-EXEMPLO",
+            "server": "vpn.empresa.com.br",
+            "username": "seu.usuario",
+            "password": "sua_senha_xauth",
+            "preshared_key": "sua_psk"
+        }
+    ]
+}
