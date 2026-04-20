@@ -7,20 +7,19 @@ import socket
 import os
 import time
 import tempfile
-import stat
-import pty
-import select
 import atexit
 import signal
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+_senha_sudo = None
 
 
 def restaurar_dns():
     try:
+        inp = (_senha_sudo + "\n").encode() if _senha_sudo else b""
         subprocess.run(
-            ["sudo", "bash", "-c", "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"],
-            timeout=5
+            ["sudo", "-S", "bash", "-c", "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"],
+            input=inp, capture_output=True, timeout=5
         )
     except Exception:
         pass
@@ -48,24 +47,28 @@ def resolve_ip(domain):
         return None
 
 
-def run_command(cmd, timeout=30):
+def sudo_run(args, senha, timeout=30):
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True,
-                                text=True, timeout=timeout)
-        return result.stdout + result.stderr
+        result = subprocess.run(
+            ["sudo", "-S"] + args,
+            input=(senha + "\n").encode(),
+            capture_output=True, timeout=timeout
+        )
+        return result.stdout.decode("utf-8", errors="replace") + result.stderr.decode("utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return "Erro: timeout na operação\n"
 
 
-def write_as_root(path, content):
+def write_as_root(path, content, senha):
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.tmp', delete=False) as f:
             f.write(content)
             tmp = f.name
         result = subprocess.run(
-            ["sudo", "cp", tmp, path],
-            capture_output=True, text=True, timeout=10
+            ["sudo", "-S", "cp", tmp, path],
+            input=(senha + "\n").encode(),
+            capture_output=True, timeout=10
         )
         return result.returncode == 0
     except Exception:
@@ -75,11 +78,41 @@ def write_as_root(path, content):
             os.unlink(tmp)
 
 
-def get_status():
-    output = run_command("sudo ipsec statusall", timeout=10)
-    if "ESTABLISHED" in output.upper():
-        return "conectado"
-    return "desconectado"
+def get_status(senha=""):
+    output = sudo_run(["ipsec", "statusall"], senha, timeout=10)
+    return "conectado" if "ESTABLISHED" in output.upper() else "desconectado"
+
+
+class SenhaDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Autenticação do sistema")
+        self.configure(bg="#1e1e2e")
+        self.resizable(False, False)
+        self.grab_set()
+        self.result = None
+
+        tk.Label(self, text="Senha do sistema (sudo):", bg="#1e1e2e", fg="#aaa",
+                 font=("Arial", 10)).pack(padx=20, pady=(20, 5))
+        self.entry = tk.Entry(self, show="●", font=("Arial", 11), bg="#2e2e3e",
+                              fg="white", insertbackground="white", relief=tk.FLAT, width=25)
+        self.entry.pack(padx=20, pady=5)
+        self.entry.bind("<Return>", lambda e: self._confirmar())
+
+        frame = tk.Frame(self, bg="#1e1e2e")
+        frame.pack(pady=15)
+        tk.Button(frame, text="Confirmar", width=10, bg="#4CAF50", fg="white",
+                  relief=tk.FLAT, cursor="hand2", font=("Arial", 10, "bold"),
+                  command=self._confirmar).pack(side=tk.LEFT, padx=8)
+        tk.Button(frame, text="Cancelar", width=10, bg="#555", fg="white",
+                  relief=tk.FLAT, cursor="hand2", font=("Arial", 10),
+                  command=self.destroy).pack(side=tk.LEFT, padx=8)
+
+        self.entry.focus()
+
+    def _confirmar(self):
+        self.result = self.entry.get()
+        self.destroy()
 
 
 class ProfileDialog(tk.Toplevel):
@@ -113,7 +146,6 @@ class ProfileDialog(tk.Toplevel):
 
         frame_btns = tk.Frame(self, bg="#1e1e2e")
         frame_btns.grid(row=len(fields), column=0, columnspan=2, pady=15)
-
         tk.Button(frame_btns, text="Salvar", width=10, bg="#4CAF50", fg="white",
                   relief=tk.FLAT, cursor="hand2", font=("Arial", 10, "bold"),
                   command=self.save).pack(side=tk.LEFT, padx=8)
@@ -149,6 +181,17 @@ class VPNManager(tk.Tk):
             self.log_text.see(tk.END)
         ))
 
+    def _obter_senha_sudo(self):
+        global _senha_sudo
+        if _senha_sudo:
+            return _senha_sudo
+        dialog = SenhaDialog(self)
+        self.wait_window(dialog)
+        if not dialog.result:
+            return None
+        _senha_sudo = dialog.result
+        return _senha_sudo
+
     def build_ui(self):
         tk.Label(self, text="VPN Manager", font=("Arial", 18, "bold"),
                  bg="#1e1e2e", fg="white").pack(pady=(20, 5))
@@ -167,7 +210,6 @@ class VPNManager(tk.Tk):
 
         frame_list = tk.Frame(self, bg="#1e1e2e")
         frame_list.pack(padx=20, fill=tk.X)
-
         self.listbox = tk.Listbox(frame_list, bg="#2e2e3e", fg="white",
                                   font=("Arial", 11), relief=tk.FLAT,
                                   selectbackground="#4CAF50", height=5,
@@ -189,7 +231,6 @@ class VPNManager(tk.Tk):
 
         frame_inputs = tk.Frame(self, bg="#1e1e2e")
         frame_inputs.pack(pady=5, padx=20, fill=tk.X)
-
         tk.Label(frame_inputs, text="Usuário:", bg="#1e1e2e", fg="#aaa",
                  font=("Arial", 10)).grid(row=0, column=0, sticky="w", pady=4)
         self.entry_user = tk.Entry(frame_inputs, font=("Arial", 11), bg="#2e2e3e",
@@ -287,7 +328,7 @@ class VPNManager(tk.Tk):
         ))
 
         def check():
-            status = get_status()
+            status = get_status(_senha_sudo or "")
             def apply():
                 if status == "conectado":
                     self.status_label.config(text="Conectado", fg="#4CAF50")
@@ -319,6 +360,10 @@ class VPNManager(tk.Tk):
             messagebox.showerror("Erro", "Usuário ou senha incorretos!")
             return
 
+        senha_sudo = self._obter_senha_sudo()
+        if not senha_sudo:
+            return
+
         self.btn_connect.config(state=tk.DISABLED)
         self.status_label.config(text="Conectando...", fg="orange")
         self.status_dot.config(text="●", fg="orange")
@@ -339,7 +384,7 @@ class VPNManager(tk.Tk):
             self._log(f"IP resolvido: {ip}\n")
 
             secrets = f'%any {ip} : PSK "{psk}"\n{usuario} : XAUTH "{senha}"\n'
-            write_as_root("/etc/ipsec.secrets", secrets)
+            write_as_root("/etc/ipsec.secrets", secrets, senha_sudo)
 
             conf = f"""config setup
     charondebug="ike 1, knl 1"
@@ -358,7 +403,7 @@ conn {conn_name}
     leftsourceip=%config
     auto=add
 """
-            write_as_root("/etc/ipsec.conf", conf)
+            write_as_root("/etc/ipsec.conf", conf, senha_sudo)
 
             self._log("Reiniciando IPsec...\n")
 
@@ -376,64 +421,37 @@ conn {conn_name}
             )
 
             script_path = None
-            proc = None
-            master_fd = None
+            out_parts = []
             try:
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as sf:
                     sf.write(script)
                     script_path = sf.name
 
-                master_fd, slave_fd = pty.openpty()
                 proc = subprocess.Popen(
-                    ["sudo", "bash", script_path],
-                    stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-                    close_fds=True
+                    ["sudo", "-S", "bash", script_path],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                 )
-                os.close(slave_fd)
+                proc.stdin.write((senha_sudo + "\n").encode())
+                proc.stdin.close()
 
-                out_parts = []
-                deadline = time.time() + 120
-                while time.time() < deadline:
-                    try:
-                        r, _, _ = select.select([master_fd], [], [], 0.5)
-                    except (OSError, ValueError):
-                        break
-                    if r:
-                        try:
-                            chunk = os.read(master_fd, 4096).decode('utf-8', errors='replace')
-                            out_parts.append(chunk)
-                            self._log(chunk)
-                        except OSError:
-                            break
-                    if proc.poll() is not None:
-                        time.sleep(0.2)
-                        try:
-                            while select.select([master_fd], [], [], 0.2)[0]:
-                                chunk = os.read(master_fd, 4096).decode('utf-8', errors='replace')
-                                out_parts.append(chunk)
-                                self._log(chunk)
-                        except OSError:
-                            pass
-                        break
-                if proc.poll() is None:
-                    proc.kill()
-                out = ''.join(out_parts)
+                for line in iter(proc.stdout.readline, b""):
+                    chunk = line.decode("utf-8", errors="replace")
+                    out_parts.append(chunk)
+                    self._log(chunk)
+
+                proc.wait(timeout=120)
             except Exception as e:
-                out = f"Erro: {e}\n"
-                self._log(out)
+                self._log(f"Erro: {e}\n")
             finally:
-                if master_fd is not None:
-                    try:
-                        os.close(master_fd)
-                    except OSError:
-                        pass
                 if script_path:
                     try:
                         os.unlink(script_path)
                     except OSError:
                         pass
 
-            self._log(out)
+            out = "".join(out_parts)
 
             if "established successfully" not in out.lower():
                 self._log("Falha na conexão. Verifique as credenciais e tente novamente.\n")
@@ -448,9 +466,9 @@ conn {conn_name}
                         dns = parts[1].split()[0].strip()
                         break
             if not dns:
-                dns = profile.get("dns", "8.8.8.8")
+                dns = profile.get("dns", "10.244.130.6")
             self._log(f"DNS detectado: {dns}\n")
-            write_as_root("/etc/resolv.conf", f"nameserver {dns}\nnameserver 8.8.8.8\n")
+            write_as_root("/etc/resolv.conf", f"nameserver {dns}\nnameserver 8.8.8.8\n", senha_sudo)
             self.after(0, self.update_status)
 
         threading.Thread(target=do_connect, daemon=True).start()
@@ -459,14 +477,18 @@ conn {conn_name}
         if not self.selected_profile:
             return
 
+        senha_sudo = self._obter_senha_sudo()
+        if not senha_sudo:
+            return
+
         self.btn_disconnect.config(state=tk.DISABLED)
         self.status_label.config(text="Desconectando...", fg="orange")
         self.status_dot.config(text="●", fg="orange")
         self.log_text.delete(1.0, tk.END)
 
         def do_disconnect():
-            out = run_command(f"sudo ipsec down {self.selected_profile['name']}", timeout=15)
-            write_as_root("/etc/resolv.conf", "nameserver 8.8.8.8\n")
+            out = sudo_run(["ipsec", "down", self.selected_profile["name"]], senha_sudo, timeout=15)
+            write_as_root("/etc/resolv.conf", "nameserver 8.8.8.8\n", senha_sudo)
             self._log(out)
             self.after(0, self.update_status)
 
