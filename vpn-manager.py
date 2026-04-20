@@ -10,8 +10,25 @@ import tempfile
 import stat
 import pty
 import select
+import atexit
+import signal
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+
+
+def restaurar_dns():
+    try:
+        subprocess.run(
+            ["sudo", "bash", "-c", "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"],
+            timeout=5
+        )
+    except Exception:
+        pass
+
+
+atexit.register(restaurar_dns)
+signal.signal(signal.SIGTERM, lambda s, f: (restaurar_dns(), exit(0)))
+signal.signal(signal.SIGINT, lambda s, f: (restaurar_dns(), exit(0)))
 
 
 def load_config():
@@ -31,29 +48,24 @@ def resolve_ip(domain):
         return None
 
 
-def run_command(cmd, sudo_env=None, timeout=30):
+def run_command(cmd, timeout=30):
     try:
-        if sudo_env:
-            cmd = cmd.replace("sudo ", "sudo -A ", 1)
-            result = subprocess.run(cmd, shell=True, capture_output=True,
-                                    text=True, env=sudo_env, timeout=timeout)
-        else:
-            result = subprocess.run(cmd, shell=True, capture_output=True,
-                                    text=True, timeout=timeout)
+        result = subprocess.run(cmd, shell=True, capture_output=True,
+                                text=True, timeout=timeout)
         return result.stdout + result.stderr
     except subprocess.TimeoutExpired:
         return "Erro: timeout na operação\n"
 
 
-def write_as_root(path, content, sudo_env):
+def write_as_root(path, content):
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.tmp', delete=False) as f:
             f.write(content)
             tmp = f.name
         result = subprocess.run(
-            ["sudo", "-A", "cp", tmp, path],
-            capture_output=True, text=True, env=sudo_env, timeout=10
+            ["sudo", "cp", tmp, path],
+            capture_output=True, text=True, timeout=10
         )
         return result.returncode == 0
     except Exception:
@@ -63,44 +75,11 @@ def write_as_root(path, content, sudo_env):
             os.unlink(tmp)
 
 
-def get_status(sudo_env=None):
-    output = run_command("sudo ipsec statusall", sudo_env=sudo_env, timeout=10)
+def get_status():
+    output = run_command("sudo ipsec statusall", timeout=10)
     if "ESTABLISHED" in output.upper():
         return "conectado"
     return "desconectado"
-
-
-class SudoDialog(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Autenticação do sistema")
-        self.configure(bg="#1e1e2e")
-        self.resizable(False, False)
-        self.grab_set()
-        self.result = None
-
-        tk.Label(self, text="🔐", font=("Arial", 24), bg="#1e1e2e").pack(pady=(18, 4))
-        tk.Label(self, text="Senha do administrador (sudo):",
-                 bg="#1e1e2e", fg="#aaa", font=("Arial", 10)).pack(padx=25)
-
-        self.entry = tk.Entry(self, font=("Arial", 11), bg="#2e2e3e", fg="white",
-                              insertbackground="white", relief=tk.FLAT, width=26, show="●")
-        self.entry.pack(padx=25, pady=8)
-        self.entry.focus_set()
-        self.entry.bind("<Return>", lambda e: self._confirm())
-
-        frame = tk.Frame(self, bg="#1e1e2e")
-        frame.pack(pady=12)
-        tk.Button(frame, text="OK", width=10, bg="#4CAF50", fg="white",
-                  relief=tk.FLAT, cursor="hand2", font=("Arial", 10, "bold"),
-                  command=self._confirm).pack(side=tk.LEFT, padx=5)
-        tk.Button(frame, text="Cancelar", width=10, bg="#555", fg="white",
-                  relief=tk.FLAT, cursor="hand2", font=("Arial", 10),
-                  command=self.destroy).pack(side=tk.LEFT, padx=5)
-
-    def _confirm(self):
-        self.result = self.entry.get()
-        self.destroy()
 
 
 class ProfileDialog(tk.Toplevel):
@@ -159,57 +138,10 @@ class VPNManager(tk.Tk):
         self.resizable(False, False)
         self.config_data = load_config()
         self.selected_profile = None
-        self._sudo_pass = None
-        self._askpass_path = None
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.build_ui()
         self.refresh_list()
         self.update_status()
-
-    def _on_close(self):
-        if self._askpass_path and os.path.exists(self._askpass_path):
-            os.unlink(self._askpass_path)
-        self.destroy()
-
-    def _sudo_env(self):
-        env = os.environ.copy()
-        env['SUDO_ASKPASS'] = self._askpass_path
-        return env
-
-    def _get_sudo_pass(self):
-        if self._sudo_pass:
-            return self._sudo_pass
-
-        dialog = SudoDialog(self)
-        self.wait_window(dialog)
-        if not dialog.result:
-            return None
-
-        # Cria o askpass script que o sudo vai chamar para buscar a senha
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False,
-                                         prefix='vpnmgr_') as f:
-            f.write(f'#!/bin/sh\nprintf "%s\\n" "{dialog.result}"\n')
-            askpass_path = f.name
-        os.chmod(askpass_path, stat.S_IRWXU)
-
-        env = os.environ.copy()
-        env['SUDO_ASKPASS'] = askpass_path
-
-        check = subprocess.run(
-            ["sudo", "-A", "true"],
-            capture_output=True, text=True, env=env, timeout=10
-        )
-        if check.returncode != 0:
-            os.unlink(askpass_path)
-            messagebox.showerror("Erro", "Senha do sistema incorreta!")
-            return None
-
-        if self._askpass_path and os.path.exists(self._askpass_path):
-            os.unlink(self._askpass_path)
-
-        self._askpass_path = askpass_path
-        self._sudo_pass = dialog.result
-        return self._sudo_pass
 
     def _log(self, text):
         self.after(0, lambda t=text: (
@@ -354,10 +286,8 @@ class VPNManager(tk.Tk):
             self.status_dot.config(fg="gray")
         ))
 
-        sudo_env = self._sudo_env() if self._askpass_path else None
-
         def check():
-            status = get_status(sudo_env)
+            status = get_status()
             def apply():
                 if status == "conectado":
                     self.status_label.config(text="Conectado", fg="#4CAF50")
@@ -389,11 +319,6 @@ class VPNManager(tk.Tk):
             messagebox.showerror("Erro", "Usuário ou senha incorretos!")
             return
 
-        if not self._get_sudo_pass():
-            return
-
-        sudo_env = self._sudo_env()
-
         self.btn_connect.config(state=tk.DISABLED)
         self.status_label.config(text="Conectando...", fg="orange")
         self.status_dot.config(text="●", fg="orange")
@@ -414,7 +339,7 @@ class VPNManager(tk.Tk):
             self._log(f"IP resolvido: {ip}\n")
 
             secrets = f'%any {ip} : PSK "{psk}"\n{usuario} : XAUTH "{senha}"\n'
-            write_as_root("/etc/ipsec.secrets", secrets, sudo_env)
+            write_as_root("/etc/ipsec.secrets", secrets)
 
             conf = f"""config setup
     charondebug="ike 1, knl 1"
@@ -427,13 +352,13 @@ conn {conn_name}
     leftid={usuario}
     right={server}
     rightid={ip}
-    rightsubnet=0.0.0.0/0
+    rightsubnet=10.244.0.0/16
     ike=aes128-sha256-modp1536,aes256-sha256-modp1536,aes128-sha256-modp2048,aes256-sha256-modp2048
     esp=aes128-sha256-modp1536,aes256-sha256-modp1536,aes128-sha256-modp1024,aes256-sha256-modp1024
     leftsourceip=%config
     auto=add
 """
-            write_as_root("/etc/ipsec.conf", conf, sudo_env)
+            write_as_root("/etc/ipsec.conf", conf)
 
             self._log("Reiniciando IPsec...\n")
 
@@ -460,9 +385,9 @@ conn {conn_name}
 
                 master_fd, slave_fd = pty.openpty()
                 proc = subprocess.Popen(
-                    ["sudo", "-A", "bash", script_path],
+                    ["sudo", "bash", script_path],
                     stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-                    env=sudo_env, close_fds=True
+                    close_fds=True
                 )
                 os.close(slave_fd)
 
@@ -525,7 +450,7 @@ conn {conn_name}
             if not dns:
                 dns = profile.get("dns", "8.8.8.8")
             self._log(f"DNS detectado: {dns}\n")
-            write_as_root("/etc/resolv.conf", f"nameserver {dns}\n", sudo_env)
+            write_as_root("/etc/resolv.conf", f"nameserver {dns}\nnameserver 8.8.8.8\n")
             self.after(0, self.update_status)
 
         threading.Thread(target=do_connect, daemon=True).start()
@@ -534,20 +459,14 @@ conn {conn_name}
         if not self.selected_profile:
             return
 
-        if not self._get_sudo_pass():
-            return
-
-        sudo_env = self._sudo_env()
-
         self.btn_disconnect.config(state=tk.DISABLED)
         self.status_label.config(text="Desconectando...", fg="orange")
         self.status_dot.config(text="●", fg="orange")
         self.log_text.delete(1.0, tk.END)
 
         def do_disconnect():
-            out = run_command(f"sudo ipsec down {self.selected_profile['name']}",
-                              sudo_env=sudo_env, timeout=15)
-            write_as_root("/etc/resolv.conf", "nameserver 8.8.8.8\n", sudo_env)
+            out = run_command(f"sudo ipsec down {self.selected_profile['name']}", timeout=15)
+            write_as_root("/etc/resolv.conf", "nameserver 8.8.8.8\n")
             self._log(out)
             self.after(0, self.update_status)
 
