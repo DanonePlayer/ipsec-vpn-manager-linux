@@ -9,8 +9,59 @@ import time
 import tempfile
 import atexit
 import signal
+import base64
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
+
+_ICON_B64 = (
+    "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"
+)
 _senha_sudo = None
 
 
@@ -163,17 +214,29 @@ class ProfileDialog(tk.Toplevel):
 
 class VPNManager(tk.Tk):
     def __init__(self):
-        super().__init__()
+        super().__init__(className="vpn-manager")
         self.title("VPN Manager")
         self.geometry("520x520")
         self.configure(bg="#1e1e2e")
         self.resizable(False, False)
+        self._set_icon()
         self.config_data = load_config()
         self.selected_profile = None
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.build_ui()
         self.refresh_list()
         self.update_status()
+
+    def _set_icon(self):
+        try:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+            if not os.path.exists(icon_path):
+                with open(icon_path, "wb") as f:
+                    f.write(base64.b64decode(_ICON_B64))
+            self._icon = tk.PhotoImage(file=icon_path)
+            self.iconphoto(True, self._icon)
+        except Exception:
+            pass
 
     def _log(self, text):
         self.after(0, lambda t=text: (
