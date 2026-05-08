@@ -13,18 +13,30 @@ Aplicativo gráfico (GUI) para gerenciar conexões VPN IPsec/XAuth com strongSwa
 - Log de conexão em tempo real
 - Autenticação sudo via janela gráfica (sem uso do terminal)
 
-## Requisitos
+## Distribuição (para usuários finais)
 
-### Sistema operacional
-- Linux (testado no Pop!\_OS / Ubuntu)
+Se quiser distribuir o app para alguém **sem que precisem instalar Python ou usar o terminal**, gere os pacotes de distribuição:
+
+```bash
+bash build.sh
+```
+
+Isso gera dois arquivos em `dist/`:
+
+| Arquivo | Para quem |
+|---|---|
+| `vpn-manager_1.0.0_amd64.deb` | Ubuntu / Linux Mint — duplo clique para instalar |
+| `VPNManager-1.0.0-x86_64.AppImage` | Qualquer Linux — duplo clique para abrir |
+
+O pacote `.deb` instala automaticamente o `strongswan` como dependência, caso não esteja presente.
+
+## Instalação para desenvolvimento
 
 ### Dependências
 
 ```bash
 sudo apt install strongswan python3 python3-tk
 ```
-
-## Instalação e configuração
 
 ### 1. Clone o repositório
 
@@ -34,8 +46,6 @@ cd ipsec-vpn-manager-linux
 ```
 
 ### 2. Configure o perfil VPN
-
-Copie o arquivo de exemplo e edite com seus dados:
 
 ```bash
 cp config.example.json config.json
@@ -58,7 +68,7 @@ Edite o `config.json`:
 ```
 
 | Campo | Descrição |
-|-------|-----------|
+|---|---|
 | `name` | Nome da conexão (sem espaços) |
 | `server` | Endereço do servidor VPN |
 | `username` | Usuário XAuth |
@@ -103,8 +113,10 @@ Ao desconectar:
 ```
 ipsec-vpn-manager-linux/
 ├── vpn-manager.py        # Aplicativo principal
-├── config.json           # Seus perfis VPN (não commitado)
+├── build.sh              # Gera .deb e AppImage para distribuição
+├── icon.png              # Ícone do app
 ├── config.example.json   # Exemplo de configuração
+├── config.json           # Seus perfis VPN (não commitado)
 └── .gitignore
 ```
 
@@ -113,3 +125,4 @@ ipsec-vpn-manager-linux/
 - O app requer permissão `sudo` para editar arquivos de sistema (`/etc/ipsec.conf`, `/etc/ipsec.secrets`, `/etc/resolv.conf`) e controlar o strongSwan
 - O `config.json` contém credenciais sensíveis — **não suba para repositórios públicos**
 - Testado com strongSwan 5.9.x em conexões IKEv1/XAuth PSK
+- Compatível com Ubuntu 22.04+ e derivados
